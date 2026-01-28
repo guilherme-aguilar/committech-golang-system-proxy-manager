@@ -1,57 +1,63 @@
 #!/bin/bash
 # Arquivo: setup.sh
 
-# Configurações do Repositório
+# --- CONFIGURAÇÃO ---
 REPO_OWNER="guilherme-aguilar"
 REPO_NAME="committech-golang-system-proxy-manager"
-BIN_NAME="proxy-manager-linux.tar.gz"
+# --------------------
 
-# Cores
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 NC='\033[0m'
 
-echo -e "${GREEN}>>> Iniciando Instalador Automático Committech...${NC}"
+echo -e "${GREEN}>>> Iniciando Instalador Committech Proxy Manager...${NC}"
 
 # 1. Detectar a última versão (Release) via API do GitHub
-echo "Buscando versão mais recente..."
+echo "🔍 Buscando a versão mais recente..."
 LATEST_TAG=$(curl -s "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
 
 if [ -z "$LATEST_TAG" ]; then
-    echo "Erro: Não foi possível encontrar uma release no GitHub."
-    echo "Certifique-se de que você criou uma Release lá."
+    echo -e "${RED}Erro: Não foi possível encontrar nenhuma Release no GitHub.${NC}"
+    echo "Certifique-se de que você rodou o './release.sh' e fez o upload do arquivo no GitHub."
     exit 1
 fi
 
+# Monta o nome do arquivo baseado no padrão do release.sh: proxy-manager-linux-v1.0.0.tar.gz
+FILE_NAME="proxy-manager-linux-${LATEST_TAG}.tar.gz"
+DOWNLOAD_URL="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$LATEST_TAG/$FILE_NAME"
+
 echo -e "Versão detectada: ${GREEN}$LATEST_TAG${NC}"
-DOWNLOAD_URL="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/$LATEST_TAG/$BIN_NAME"
+echo -e "Arquivo alvo: $FILE_NAME"
 
 # 2. Preparar ambiente temporário
 TMP_DIR=$(mktemp -d)
-echo "Diretório temporário: $TMP_DIR"
 
-# 3. Baixar
-echo "Baixando $DOWNLOAD_URL..."
-if curl -L -o "$TMP_DIR/$BIN_NAME" "$DOWNLOAD_URL"; then
-    echo "Download concluído."
-else
-    echo "Erro no download."
+# 3. Baixar o arquivo
+echo "⬇️  Baixando..."
+http_code=$(curl -sL -w "%{http_code}" -o "$TMP_DIR/$FILE_NAME" "$DOWNLOAD_URL")
+
+if [ "$http_code" != "200" ]; then
+    echo -e "${RED}Erro no download (HTTP $http_code).${NC}"
+    echo "URL tentada: $DOWNLOAD_URL"
+    echo "Verifique se você anexou o arquivo .tar.gz corretamente na Release do GitHub."
+    rm -rf "$TMP_DIR"
     exit 1
 fi
 
 # 4. Extrair e Instalar
-echo "Extraindo..."
-tar -xzf "$TMP_DIR/$BIN_NAME" -C "$TMP_DIR"
+echo "📦 Extraindo..."
+tar -xzf "$TMP_DIR/$FILE_NAME" -C "$TMP_DIR"
 
-echo "Executando script de instalação interno..."
-# Entra na pasta descompactada (ajuste o nome da pasta se seu tar criar uma subpasta)
+echo "🚀 Executando script de instalação..."
+# Entra na pasta descompactada (o tar cria a pasta 'proxy-manager')
 cd "$TMP_DIR/proxy-manager"
 
-# Garante permissão e executa
+# Garante permissão e executa o install.sh interno
 chmod +x install.sh
-if sudo ./install.sh; then
-    echo -e "${GREEN}Instalação Finalizada com Sucesso!${NC}"
+if ./install.sh; then
+    echo -e "${GREEN}✅ Instalação da versão $LATEST_TAG concluída com sucesso!${NC}"
 else
-    echo "Erro na execução do install.sh"
+    echo -e "${RED}❌ Falha na execução do script de instalação local.${NC}"
     exit 1
 fi
 
