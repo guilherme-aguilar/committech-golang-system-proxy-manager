@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"log"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 var db *sql.DB
@@ -32,7 +32,7 @@ type UserData struct {
 
 func initDB() {
 	var err error
-	db, err = sql.Open("sqlite3", "./manager.db")
+	db, err = sql.Open("sqlite", "./manager.db")
 	if err != nil {
 		log.Fatal(err)
 	}
