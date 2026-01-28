@@ -63,7 +63,17 @@ var manager = &GroupManager{
 	groups: make(map[string]*Group),
 }
 
+var (
+	// Essa variável será sobrescrita pelo script de build!
+	Version = "dev"
+	// ... manager, cfg etc
+)
+
 func main() {
+
+	// Mostra a versão no log ao iniciar
+	log.Printf("[Init] Iniciando Proxy Manager Enterprise - Versão: %s", Version)
+
 	// 0. Carregar Configurações
 	configFile := flag.String("config", "server.toml", "Caminho do arquivo de configuração")
 	flag.Parse()
