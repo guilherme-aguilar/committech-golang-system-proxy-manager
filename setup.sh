@@ -49,8 +49,12 @@ echo "📦 Extraindo..."
 tar -xzf "$TMP_DIR/$FILE_NAME" -C "$TMP_DIR"
 
 echo "🚀 Executando script de instalação..."
-# Entra na pasta descompactada (o tar cria a pasta 'proxy-manager')
 cd "$TMP_DIR/proxy-manager"
+
+# --- ADICIONE ESTAS 2 LINHAS AQUI ---
+echo "📂 Conteúdo da pasta extraída:"
+ls -la
+# ------------------------------------
 
 # Garante permissão e executa o install.sh interno
 chmod +x install.sh
