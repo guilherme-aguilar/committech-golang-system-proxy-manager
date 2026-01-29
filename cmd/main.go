@@ -291,13 +291,16 @@ func startAdminServer(addr string) {
 	// 4. Rota de Status (Monitoramento)
 	mux.HandleFunc("/status", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		filter := r.URL.Query().Get("group")
-		manager.mu.RLock()
-		defer manager.mu.RUnlock()
+
+		// Estrutura temporária para o JSON
 		type ClientData struct {
 			ID   string `json:"id"`
 			Addr string `json:"addr"`
 		}
 		report := make(map[string][]ClientData)
+
+		// 1. Bloqueia, Copia Rápido e Desbloqueia
+		manager.mu.RLock()
 		for groupName, group := range manager.groups {
 			if filter != "" && filter != "all" && groupName != filter {
 				continue
@@ -310,6 +313,10 @@ func startAdminServer(addr string) {
 			}
 			report[groupName] = active
 		}
+		manager.mu.RUnlock() // <--- SOLTA A TRAVA AQUI, ANTES DE ENVIAR
+
+		// 2. Envia para o cliente (Se demorar, não trava o servidor)
+		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(report)
 	}))
 
