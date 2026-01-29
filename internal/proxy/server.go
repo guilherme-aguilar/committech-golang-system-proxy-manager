@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"proxy-manager/internal/config"
@@ -16,30 +17,70 @@ import (
 	"proxy-manager/internal/manager"
 )
 
+// --- SISTEMA DE RATE LIMIT (O Porteiro) ---
+var (
+	ipMutex    sync.Mutex
+	ipLastSeen = make(map[string]time.Time)
+	// Limpa o mapa a cada 5 minutos para não estourar memória
+	cleanupTime = time.Now()
+)
+
+func isRateLimited(ip string) bool {
+	ipMutex.Lock()
+	defer ipMutex.Unlock()
+
+	// Limpeza automática de memória se o mapa ficar muito grande
+	if len(ipLastSeen) > 5000 || time.Since(cleanupTime) > 5*time.Minute {
+		ipLastSeen = make(map[string]time.Time)
+		cleanupTime = time.Now()
+	}
+
+	last, exists := ipLastSeen[ip]
+	now := time.Now()
+
+	// Se o IP fez requisição há menos de 1 segundo, BLOQUEIA.
+	// Isso impede o Brute-Force rápido.
+	if exists && now.Sub(last) < 1000*time.Millisecond {
+		return true
+	}
+
+	ipLastSeen[ip] = now
+	return false
+}
+
+// ------------------------------------------
+
 func Start(cfg *config.Config, mgr *manager.GroupManager) {
 	srv := &http.Server{
 		Addr: cfg.Network.ProxyPort,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handle(w, r, mgr)
 		}),
-		// Timeouts agressivos para derrubar conexões lentas (Slowloris)
-		ReadTimeout:       10 * time.Second,
+		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 5 * time.Second,
+		ReadHeaderTimeout: 2 * time.Second,
 	}
-	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Mode: Anti-Brute-Force)", cfg.Network.ProxyPort)
+	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Proteção: Rate Limit Ativo)", cfg.Network.ProxyPort)
 	log.Fatal(srv.ListenAndServe())
 }
 
 func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
-	// 1. Pega IP Real (Suporte a Cloudflare/Forwarded)
+	// 1. Pega IP Real
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
 	}
 
-	// 2. Valida Header de Auth
+	// 2. CHECK DE RATE LIMIT (ANTES DE TUDO)
+	// Se o cara está floodando, rejeita aqui e salva a CPU.
+	if isRateLimited(ip) {
+		// Retorna 429 Too Many Requests sem processar nada pesado
+		http.Error(w, "Too Many Requests", 429)
+		return
+	}
+
+	// 3. Valida Auth
 	auth := r.Header.Get("Proxy-Authorization")
 	if auth == "" {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
@@ -47,43 +88,35 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 		return
 	}
 
-	// 3. Parse Basic Auth
-	// Se o payload for lixo, rejeita rápido
+	// Parse rápido (custo de CPU baixo)
 	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	if err != nil {
 		http.Error(w, "Bad Request", 400)
 		return
 	}
-
 	pair := strings.SplitN(string(payload), ":", 2)
 	if len(pair) != 2 {
 		http.Error(w, "Bad Auth", 400)
 		return
 	}
 
-	// 4. Autenticação no Banco (O PONTO CRÍTICO)
+	// 4. Autenticação no Banco (Custo de CPU ALTO)
+	// Agora só chega aqui quem passou pelo Rate Limit (1 req/segundo)
 	group, ok := database.AuthenticateUser(pair[0], pair[1], ip)
 	if !ok {
-		// --- TARPIT (ARMADILHA) ---
-		// Se errou a senha, dorme 2 segundos antes de responder.
-		// Isso impede que o atacante teste milhares de senhas por segundo.
-		// E libera a CPU para fazer outras coisas.
-		log.Printf("[Block] Brute-Force detectado de IP: %s (User: %s)", ip, pair[0])
-		time.Sleep(2 * time.Second)
-		// --------------------------
-
+		// Tarpit leve de 1s para desencorajar
+		time.Sleep(1 * time.Second)
 		http.Error(w, "Forbidden", 403)
 		return
 	}
 
-	// 5. Busca Sessão
+	// 5. Sessão e Túnel
 	sess := mgr.GetSession(group)
 	if sess == nil {
 		http.Error(w, "No Agents Online", 503)
 		return
 	}
 
-	// 6. Abre Stream
 	stream, err := sess.Open()
 	if err != nil {
 		http.Error(w, "Tunnel Error", 502)
@@ -106,7 +139,6 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, stream net.Conn) {
 	}
 	conn, _, err := hijacker.Hijack()
 	if err != nil {
-		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer conn.Close()
@@ -122,10 +154,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, stream net.Conn) {
 	if err := r.Write(stream); err != nil {
 		return
 	}
-
 	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
 	if err != nil {
-		// Não retorna erro HTTP aqui para não quebrar streaming, apenas fecha
 		return
 	}
 	defer resp.Body.Close()
