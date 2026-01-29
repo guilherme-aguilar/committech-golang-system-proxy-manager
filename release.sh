@@ -37,7 +37,10 @@ rm -rf dist
 mkdir -p $DIST_DIR
 
 echo "🔨 Compilando..."
-env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${VERSION}" -o $DIST_DIR/$BINARY_NAME ./cmd/server
+# old building 
+# env GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${VERSION}" -o $DIST_DIR/$BINARY_NAME ./cmd/server
+# CGO_ENABLED=0 garante um binário estático, sem dependências de bibliotecas C do Mac
+env CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${VERSION}" -o $DIST_DIR/$BINARY_NAME ./cmd/server
 
 if [ $? -ne 0 ]; then
     echo -e "${RED}❌ Erro na compilação!${NC}"
