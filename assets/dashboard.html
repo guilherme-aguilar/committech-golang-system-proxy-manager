@@ -86,7 +86,7 @@
                                         <th class="px-5 py-3 w-1/3">ID do Cliente</th>
                                         <th class="px-5 py-3">Grupo</th>
                                         <th class="px-5 py-3">IP Origem</th>
-                                        <th class="px-5 py-3 text-right">Uptime</th>
+                                        <th class="px-5 py-3 text-right">Status</th>
                                     </tr>
                                 </thead>
                                 <tbody id="proxyList" class="divide-y divide-slate-100 text-xs"></tbody>
@@ -221,9 +221,16 @@
             const separator = url.includes('?') ? '&' : '?';
             url = `${url}${separator}_t=${new Date().getTime()}`;
         }
-        const res = await fetch(url, opts);
-        if (res.status === 401) logout();
-        return res;
+        
+        try {
+            const res = await fetch(url, opts);
+            if (res.status === 401) { logout(); return null; }
+            if (!res.ok) { console.error(`Erro API [${url}]:`, res.status); return null; }
+            return res;
+        } catch (error) {
+            console.error("Falha na requisição:", error);
+            return null;
+        }
     }
 
     // --- Actions ---
@@ -232,9 +239,8 @@
         e.preventDefault();
         const g = document.getElementById('newTokenGroup').value;
         const res = await api('/proxy-tokens', 'POST', {Group:g});
-        if(res.ok) {
+        if(res && res.ok) {
             const data = await res.json();
-            // Copiar para clipboard
             navigator.clipboard.writeText(data.token);
             prompt(`Token gerado para ${g}!\n\nFoi copiado para a área de transferência.\nSalve-o agora, ele não será exibido novamente.`, data.token);
             refreshData();
@@ -244,56 +250,65 @@
     async function refreshData() {
         if (document.getElementById('view-monitor').classList.contains('hidden')) return;
 
-        // Status
         try {
-            const statusData = await (await api(`/status?group=${currentFilter}`)).json();
-            let htmlProxy = '', total = 0;
-            for (const [grp, clients] of Object.entries(statusData)) {
-                clients.forEach(c => {
-                    total++;
-                    htmlProxy += `
-                    <tr class="hover:bg-slate-50 transition-colors">
-                        <td class="px-5 py-3 font-mono text-slate-600 font-medium">${c.id}</td>
-                        <td class="px-5 py-3"><span class="px-2 py-1 rounded bg-slate-100 border border-slate-200 text-xs text-slate-500 font-medium">${grp}</span></td>
-                        <td class="px-5 py-3 text-slate-500 font-mono text-xs">${c.addr}</td>
-                        <td class="px-5 py-3 text-right text-green-600 font-medium flex justify-end items-center gap-1">
-                            <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span> Online
-                        </td>
-                    </tr>`;
-                });
+            // Status
+            const resStatus = await api(`/status?group=${currentFilter}`);
+            if (resStatus) {
+                const statusData = await resStatus.json();
+                let htmlProxy = '', total = 0;
+                for (const [grp, clients] of Object.entries(statusData)) {
+                    clients.forEach(c => {
+                        total++;
+                        htmlProxy += `
+                        <tr class="hover:bg-slate-50 transition-colors">
+                            <td class="px-5 py-3 font-mono text-slate-600 font-medium">${c.id}</td>
+                            <td class="px-5 py-3"><span class="px-2 py-1 rounded bg-slate-100 border border-slate-200 text-xs text-slate-500 font-medium">${grp}</span></td>
+                            <td class="px-5 py-3 text-slate-500 font-mono text-xs">${c.addr}</td>
+                            <td class="px-5 py-3 text-right text-green-600 font-medium flex justify-end items-center gap-1">
+                                <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span> Online
+                            </td>
+                        </tr>`;
+                    });
+                }
+                document.getElementById('proxyList').innerHTML = htmlProxy || '<tr><td colspan="4" class="p-8 text-center text-slate-400 italic">Nenhuma conexão ativa no momento.</td></tr>';
+                document.getElementById('totalCount').innerText = total;
             }
-            document.getElementById('proxyList').innerHTML = htmlProxy || '<tr><td colspan="4" class="p-8 text-center text-slate-400 italic">Nenhuma conexão ativa no momento.</td></tr>';
-            document.getElementById('totalCount').innerText = total;
 
             // Tokens
-            const tokens = await (await api(`/proxy-tokens?group=${currentFilter}`)).json();
-            document.getElementById('tokenList').innerHTML = Object.entries(tokens).map(([grp, t]) => 
-                `<tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-5 py-3">
-                        <div class="font-mono text-xs text-slate-600 bg-slate-100 p-1 rounded border break-all cursor-pointer hover:bg-white" onclick="navigator.clipboard.writeText('${t}')" title="Clique para copiar">
-                            ${t}
-                        </div>
-                    </td>
-                    <td class="px-5 py-3 text-slate-500 text-xs">${grp}</td>
-                    <td class="px-5 py-3 text-right"><button onclick="delToken('${t}')" class="text-slate-300 hover:text-red-500 transition-colors">×</button></td>
-                </tr>`
-            ).join('') || '<tr><td colspan="3" class="p-4 text-center text-slate-400 text-xs">Sem tokens ativos</td></tr>';
+            const resTokens = await api(`/proxy-tokens?group=${currentFilter}`);
+            if (resTokens) {
+                const tokens = await resTokens.json();
+                document.getElementById('tokenList').innerHTML = Object.entries(tokens).map(([grp, t]) => 
+                    `<tr class="hover:bg-slate-50 transition-colors">
+                        <td class="px-5 py-3">
+                            <div class="font-mono text-xs text-slate-600 bg-slate-100 p-1 rounded border break-all cursor-pointer hover:bg-white" onclick="navigator.clipboard.writeText('${t}')" title="Clique para copiar">
+                                ${t}
+                            </div>
+                        </td>
+                        <td class="px-5 py-3 text-slate-500 text-xs">${grp}</td>
+                        <td class="px-5 py-3 text-right"><button onclick="delToken('${t}')" class="text-slate-300 hover:text-red-500 transition-colors">×</button></td>
+                    </tr>`
+                ).join('') || '<tr><td colspan="3" class="p-4 text-center text-slate-400 text-xs">Sem tokens ativos</td></tr>';
+            }
 
-            // Users (MODIFICADO: Não mostra senha)
-            const users = await (await api(`/users?group=${currentFilter}`)).json();
-            document.getElementById('userList').innerHTML = users.map(u => 
-                `<tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-5 py-3 font-medium text-slate-700">
-                        <div class="flex items-center gap-2">
-                            <span class="text-blue-600 font-bold">${u.username}</span>
-                            <span class="text-[10px] bg-green-50 text-green-600 border border-green-100 px-1.5 rounded" title="Senha criptografada com BCrypt">Seguro</span>
-                        </div>
-                    </td>
-                    <td class="px-5 py-3 text-slate-500">${u.group}</td>
-                    <td class="px-5 py-3 text-right"><button onclick="delUser('${u.username}')" class="text-slate-300 hover:text-red-500 transition-colors">×</button></td>
-                </tr>`
-            ).join('') || '<tr><td colspan="3" class="p-4 text-center text-slate-400 text-xs">Nenhum usuário criado</td></tr>';
-        
+            // Users
+            const resUsers = await api(`/users?group=${currentFilter}`);
+            if (resUsers) {
+                const users = await resUsers.json();
+                document.getElementById('userList').innerHTML = users.map(u => 
+                    `<tr class="hover:bg-slate-50 transition-colors">
+                        <td class="px-5 py-3 font-medium text-slate-700">
+                            <div class="flex items-center gap-2">
+                                <span class="text-blue-600 font-bold">${u.username}</span>
+                                <span class="text-[10px] bg-green-50 text-green-600 border border-green-100 px-1.5 rounded" title="Senha criptografada com BCrypt">Seguro</span>
+                            </div>
+                        </td>
+                        <td class="px-5 py-3 text-slate-500">${u.group}</td>
+                        <td class="px-5 py-3 text-right"><button onclick="delUser('${u.username}')" class="text-slate-300 hover:text-red-500 transition-colors">×</button></td>
+                    </tr>`
+                ).join('') || '<tr><td colspan="3" class="p-4 text-center text-slate-400 text-xs">Nenhum usuário criado</td></tr>';
+            }
+
         } catch (e) {
             console.error("Erro ao atualizar dados", e);
         }
@@ -302,11 +317,29 @@
     async function handleLogin(e) { e.preventDefault(); const t = document.getElementById('adminToken').value; const res = await fetch('/status', { headers: { 'Authorization': 'Bearer ' + t } }); if (res.ok) { authToken = t; localStorage.setItem('token', t); initApp(); } else alert('Token inválido'); }
     function checkAuth() { if (authToken) initApp(); }
     function logout() { localStorage.removeItem('token'); location.reload(); }
-    function initApp() { document.getElementById('loginScreen').classList.add('hidden'); document.getElementById('app').classList.remove('hidden'); loadGroups(); refreshData(); setInterval(refreshData, 3000); }
+
+    // --- CORREÇÃO DO LOOP AQUI ---
+    function initApp() { 
+        document.getElementById('loginScreen').classList.add('hidden'); 
+        document.getElementById('app').classList.remove('hidden'); 
+        loadGroups(); 
+        
+        // Inicia o loop recursivo seguro
+        dataLoop(); 
+    }
+
+    // Loop Recursivo (Evita encavalamento de requisições)
+    async function dataLoop() {
+        await refreshData();
+        // Só agenda o próximo se o anterior terminou
+        setTimeout(dataLoop, 3000);
+    }
+    // -----------------------------
+
     function switchTab(tab) { document.getElementById('view-monitor').classList.add('hidden'); document.getElementById('view-admin').classList.add('hidden'); document.getElementById('tab-monitor').classList.replace('bg-white', 'text-slate-500'); document.getElementById('tab-monitor').classList.remove('shadow', 'text-blue-700'); document.getElementById('tab-admin').classList.replace('bg-white', 'text-slate-500'); document.getElementById('tab-admin').classList.remove('shadow', 'text-blue-700'); document.getElementById('view-' + tab).classList.remove('hidden'); const activeBtn = document.getElementById('tab-' + tab); activeBtn.classList.add('bg-white', 'shadow', 'text-blue-700'); activeBtn.classList.remove('text-slate-500'); if (tab === 'admin') loadGroupsList(); }
     function changeGlobalFilter() { currentFilter = document.getElementById('globalGroupSelect').value; refreshData(); if (currentFilter !== 'all') { document.getElementById('newTokenGroup').value = currentFilter; document.getElementById('newUserGroup').value = currentFilter; } }
-    async function loadGroups() { const res = await api('/groups'); const groups = await res.json(); const sel = document.getElementById('globalGroupSelect'); const oldVal = sel.value; sel.innerHTML = '<option value="all">Todos os Grupos</option>'; groups.forEach(g => { sel.innerHTML += `<option value="${g}">${g}</option>`; }); sel.value = oldVal; }
-    async function loadGroupsList() { const groups = await (await api('/groups')).json(); document.getElementById('groupList').innerHTML = groups.map(g => `<tr class="hover:bg-slate-50 border-b border-slate-100"><td class="px-5 py-3 font-medium text-slate-800">${g}</td><td class="px-5 py-3"><span class="px-2 py-1 rounded text-xs bg-green-100 text-green-700">Ativo</span></td><td class="px-5 py-3 text-right space-x-2"><button onclick="delGroup('${g}')" class="text-red-500 hover:underline text-xs">Excluir</button></td></tr>`).join(''); }
+    async function loadGroups() { const res = await api('/groups'); if(res) { const groups = await res.json(); const sel = document.getElementById('globalGroupSelect'); const oldVal = sel.value; sel.innerHTML = '<option value="all">Todos os Grupos</option>'; groups.forEach(g => { sel.innerHTML += `<option value="${g}">${g}</option>`; }); sel.value = oldVal; } }
+    async function loadGroupsList() { const res = await api('/groups'); if(res) { const groups = await res.json(); document.getElementById('groupList').innerHTML = groups.map(g => `<tr class="hover:bg-slate-50 border-b border-slate-100"><td class="px-5 py-3 font-medium text-slate-800">${g}</td><td class="px-5 py-3"><span class="px-2 py-1 rounded text-xs bg-green-100 text-green-700">Ativo</span></td><td class="px-5 py-3 text-right space-x-2"><button onclick="delGroup('${g}')" class="text-red-500 hover:underline text-xs">Excluir</button></td></tr>`).join(''); } }
     
     async function createUser(e) { e.preventDefault(); const u = document.getElementById('newUser').value; const p = document.getElementById('newPass').value; const g = document.getElementById('newUserGroup').value; const i = document.getElementById('newIP').value; if(await api('/users', 'POST', {Username:u, AccessKey:p, Group:g, IP:i})) { document.getElementById('newUser').value = ''; document.getElementById('newPass').value = ''; refreshData(); alert('Usuário salvo com sucesso!'); } }
     async function createGroup(e) { e.preventDefault(); const n = document.getElementById('newGroupName').value; if(await api('/groups', 'POST', {Name:n})) { document.getElementById('newGroupName').value = ''; loadGroupsList(); loadGroups(); } }
