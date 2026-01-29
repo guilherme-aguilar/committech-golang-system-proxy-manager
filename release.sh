@@ -59,10 +59,8 @@ echo "📦 Compactando..."
 cd dist
 tar -czvf $ARCHIVE_NAME proxy-manager/
 
-# --- LIMPEZA AQUI ---
-echo "🧹 Removendo arquivos temporários (mantendo apenas o .tar.gz)..."
+# Remove a pasta descompactada temporária
 rm -rf proxy-manager/
-# --------------------
 
 cd ..
 
@@ -81,14 +79,16 @@ gh release create "$VERSION" "$FILE_TO_UPLOAD" \
     --notes "Release automática." \
     --latest
 
+# --- LIMPEZA TOTAL AQUI ---
 if [ $? -eq 0 ]; then
     echo ""
     echo -e "${GREEN}✅ SUCESSO!${NC}"
-    echo "Arquivo enviado: $ARCHIVE_NAME"
+    echo "O arquivo foi enviado para o GitHub."
     
-    # OPCIONAL: Se quiser limpar TAMBÉM o .tar.gz local depois de subir, descomente abaixo:
-    # rm -rf dist
-    # echo "🗑️  Pasta dist removida localmente."
+    echo "🧹 Limpeza Final: Removendo arquivos locais..."
+    rm -rf dist
+    
+    echo "✨ Tudo pronto e limpo."
 else
-    echo -e "${RED}❌ Erro no upload.${NC}"
+    echo -e "${RED}❌ Erro no upload. O arquivo .tar.gz foi mantido em 'dist/' para análise.${NC}"
 fi
