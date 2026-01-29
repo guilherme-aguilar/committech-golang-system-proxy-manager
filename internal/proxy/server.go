@@ -22,18 +22,24 @@ func Start(cfg *config.Config, mgr *manager.GroupManager) {
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handle(w, r, mgr)
 		}),
-		// --- TIMEOUTS DE SEGURANÇA ---
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		ReadHeaderTimeout: 5 * time.Second, // Importante contra Slowloris
+		// Timeouts agressivos para derrubar conexões lentas (Slowloris)
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s", cfg.Network.ProxyPort)
+	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Mode: Anti-Brute-Force)", cfg.Network.ProxyPort)
 	log.Fatal(srv.ListenAndServe())
 }
 
 func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
-	// 1. Validação de Autenticação (Basic Auth)
+	// 1. Pega IP Real (Suporte a Cloudflare/Forwarded)
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
+	}
+
+	// 2. Valida Header de Auth
 	auth := r.Header.Get("Proxy-Authorization")
 	if auth == "" {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy"`)
@@ -41,36 +47,43 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 		return
 	}
 
-	// Parse Basic Auth
-	payload, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	// 3. Parse Basic Auth
+	// Se o payload for lixo, rejeita rápido
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+	if err != nil {
+		http.Error(w, "Bad Request", 400)
+		return
+	}
+
 	pair := strings.SplitN(string(payload), ":", 2)
 	if len(pair) != 2 {
 		http.Error(w, "Bad Auth", 400)
 		return
 	}
 
-	// 2. Detecção de IP Real
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
-	}
-
-	// 3. Autenticação no Banco
+	// 4. Autenticação no Banco (O PONTO CRÍTICO)
 	group, ok := database.AuthenticateUser(pair[0], pair[1], ip)
 	if !ok {
-		log.Printf("[Block] User %s IP %s negado", pair[0], ip)
+		// --- TARPIT (ARMADILHA) ---
+		// Se errou a senha, dorme 2 segundos antes de responder.
+		// Isso impede que o atacante teste milhares de senhas por segundo.
+		// E libera a CPU para fazer outras coisas.
+		log.Printf("[Block] Brute-Force detectado de IP: %s (User: %s)", ip, pair[0])
+		time.Sleep(2 * time.Second)
+		// --------------------------
+
 		http.Error(w, "Forbidden", 403)
 		return
 	}
 
-	// 4. Busca Sessão Ativa
+	// 5. Busca Sessão
 	sess := mgr.GetSession(group)
 	if sess == nil {
 		http.Error(w, "No Agents Online", 503)
 		return
 	}
 
-	// 5. Abre Stream no Túnel
+	// 6. Abre Stream
 	stream, err := sess.Open()
 	if err != nil {
 		http.Error(w, "Tunnel Error", 502)
@@ -78,7 +91,6 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 	}
 	defer stream.Close()
 
-	// 6. Roteamento (Connect vs HTTP Padrão)
 	if r.Method == http.MethodConnect {
 		handleTunnel(w, r, stream)
 	} else {
@@ -87,7 +99,6 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 }
 
 func handleTunnel(w http.ResponseWriter, r *http.Request, stream net.Conn) {
-	// HTTPS Tunneling
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "Hijacking not supported", 500)
@@ -100,32 +111,25 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, stream net.Conn) {
 	}
 	defer conn.Close()
 
-	// Avisa o cliente que o túnel abriu
 	conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
-
-	// Envia o CONNECT original para o Agente saber onde ir
 	fmt.Fprintf(stream, "CONNECT %s HTTP/1.1\r\n\r\n", r.Host)
 
-	// Pipe bidirecional
 	go io.Copy(stream, conn)
 	io.Copy(conn, stream)
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request, stream net.Conn) {
-	// HTTP Plain Proxying
 	if err := r.Write(stream); err != nil {
-		http.Error(w, "Error writing to stream", 502)
 		return
 	}
 
 	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
 	if err != nil {
-		http.Error(w, "Gateway Error", 502)
+		// Não retorna erro HTTP aqui para não quebrar streaming, apenas fecha
 		return
 	}
 	defer resp.Body.Close()
 
-	// Copia Headers de volta
 	for k, v := range resp.Header {
 		for _, vv := range v {
 			w.Header().Add(k, vv)
