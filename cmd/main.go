@@ -75,7 +75,7 @@ func main() {
 	// 1. Iniciar Banco
 	initDB()
 
-	// 2. BOOTSTRAPPING SEGURO (MUDANÇA CRÍTICA AQUI)
+	// 2. BOOTSTRAPPING SEGURO
 	if !hasUsers() {
 		log.Println("[Init] ⚠️ Banco vazio detectado.")
 
@@ -190,13 +190,12 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TENTA PEGAR O IP REAL (RESOLVENDO SUA DÚVIDA)
+	// TENTA PEGAR O IP REAL
 	clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 
 	// Verifica cabeçalhos de Proxy Transparente
 	realIP := r.Header.Get("X-Forwarded-For")
 	if realIP != "" {
-		// Pega o primeiro IP da lista se houver vários (ex: "200.1.1.1, 172.16.3.89")
 		ips := strings.Split(realIP, ",")
 		clientIP = strings.TrimSpace(ips[0])
 	}
@@ -205,9 +204,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	targetGroup, authorized := authenticateUser(user, pass, clientIP)
 
 	if !authorized {
-		// Log detalhado para te ajudar a debugar quem é o atacante
 		log.Printf("[Block] User: %s | SourceIP: %s (Gateway: %s) | Acesso Negado", user, clientIP, r.RemoteAddr)
-
 		w.Header().Set("Proxy-Authenticate", `Basic realm="Proxy Access"`)
 		http.Error(w, "Forbidden", 403)
 		return
@@ -237,8 +234,9 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func startAdminServer(addr string) {
 	mux := http.NewServeMux()
+
+	// 1. Rota do Dashboard (HTML)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Se a rota não for EXATAMENTE "/" ou "/dashboard.html", retorna 404
 		if r.URL.Path != "/" && r.URL.Path != "/dashboard.html" {
 			http.NotFound(w, r)
 			return
@@ -246,7 +244,93 @@ func startAdminServer(addr string) {
 		http.ServeFile(w, r, "dashboard.html")
 	})
 
-	// Exemplo de uma rota de API:
+	// 2. Rota de Grupos
+	mux.HandleFunc("/groups", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			json.NewEncoder(w).Encode(getAllGroups())
+		} else if r.Method == "POST" {
+			var req struct{ Name string }
+			json.NewDecoder(r.Body).Decode(&req)
+			createGroup(req.Name)
+			w.WriteHeader(http.StatusCreated)
+		} else if r.Method == "DELETE" {
+			group := r.URL.Query().Get("name")
+			deleteGroup(group)
+			// Chama a função que estava faltando
+			manager.forceDisconnectGroup(group)
+			w.WriteHeader(http.StatusOK)
+		} else if r.Method == "PUT" {
+			var req struct {
+				Name   string
+				Status string
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+			toggleGroupStatus(req.Name, req.Status)
+			if req.Status == "inactive" {
+				// Chama a função que estava faltando
+				manager.forceDisconnectGroup(req.Name)
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
+	// 3. Rota de Conexões (Derrubar cliente)
+	mux.HandleFunc("/connections", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" {
+			group := r.URL.Query().Get("group")
+			id := r.URL.Query().Get("id")
+			// Chama a função que estava faltando
+			if manager.disconnectClient(group, id) {
+				w.WriteHeader(http.StatusOK)
+			} else {
+				w.WriteHeader(http.StatusNotFound)
+			}
+		}
+	}))
+
+	// 4. Rota de Status (Monitoramento)
+	mux.HandleFunc("/status", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		filter := r.URL.Query().Get("group")
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		type ClientData struct {
+			ID   string `json:"id"`
+			Addr string `json:"addr"`
+		}
+		report := make(map[string][]ClientData)
+		for groupName, group := range manager.groups {
+			if filter != "" && filter != "all" && groupName != filter {
+				continue
+			}
+			var active []ClientData
+			for _, c := range group.Clients {
+				if !c.Session.IsClosed() {
+					active = append(active, ClientData{ID: c.ID, Addr: c.Session.RemoteAddr().String()})
+				}
+			}
+			report[groupName] = active
+		}
+		json.NewEncoder(w).Encode(report)
+	}))
+
+	// 5. Rota de Tokens de Grupo
+	mux.HandleFunc("/proxy-tokens", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" {
+			json.NewEncoder(w).Encode(getAllTokens(r.URL.Query().Get("group")))
+		} else if r.Method == "POST" {
+			var req struct{ Group string }
+			json.NewDecoder(r.Body).Decode(&req)
+			newToken := generateAndSetToken(req.Group)
+			manager.forceDisconnectGroup(req.Group)
+			json.NewEncoder(w).Encode(map[string]string{"token": newToken})
+			w.WriteHeader(http.StatusCreated)
+		} else if r.Method == "DELETE" {
+			deleteToken(r.URL.Query().Get("token"))
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+
+	// 6. Rota de Usuários
 	mux.HandleFunc("/users", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "GET" {
 			json.NewEncoder(w).Encode(getAllUsers(r.URL.Query().Get("group")))
@@ -261,8 +345,7 @@ func startAdminServer(addr string) {
 			if req.IP == "" {
 				req.IP = "*"
 			}
-
-			// addUser agora faz o hash internamente
+			// addUser já faz o hash internamente agora
 			if err := addUser(req.Username, req.AccessKey, req.Group, req.IP); err != nil {
 				http.Error(w, err.Error(), 500)
 				return
@@ -273,9 +356,6 @@ func startAdminServer(addr string) {
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
-
-	// ... Adicione as outras rotas (tokens, groups, status) aqui, igual ao anterior ...
-	// (Omissas para brevidade, mas a lógica é a mesma, só chamam as func do database.go)
 
 	log.Printf("[Admin] ⚙️  Painel Web em http://localhost%s", addr)
 	http.ListenAndServe(addr, mux)
@@ -352,7 +432,6 @@ func handleNewTunnelConnection(conn net.Conn) {
 
 	cert := state.PeerCertificates[0]
 	clientID := cert.Subject.CommonName
-	// Parse do grupo via OU
 	ouParts := strings.Split(cert.Subject.OrganizationalUnit[0], ":")
 	groupName := ouParts[0]
 
@@ -433,7 +512,8 @@ func handleHTTP(w http.ResponseWriter, r *http.Request, stream net.Conn) {
 	io.Copy(w, resp.Body)
 }
 
-// Métodos do Manager (registerClient, getSession) mantêm-se iguais ao seu código anterior.
+// --- MÉTODOS DO MANAGER (ADICIONADAS AS FUNÇÕES QUE FALTAVAM) ---
+
 func (m *GroupManager) registerClient(clientID, group string, s *yamux.Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -441,7 +521,18 @@ func (m *GroupManager) registerClient(clientID, group string, s *yamux.Session) 
 		m.groups[group] = &Group{}
 	}
 	g := m.groups[group]
-	// ... lógica de limpeza e add ...
+
+	// Limpa conexões antigas do mesmo ID
+	var active []*ProxyClient
+	for _, c := range g.Clients {
+		if c.ID == clientID {
+			c.Session.Close()
+		} else if !c.Session.IsClosed() {
+			active = append(active, c)
+		}
+	}
+	g.Clients = active
+
 	g.Clients = append(g.Clients, &ProxyClient{ID: clientID, Session: s})
 	log.Printf("[Registry] '%s' registrado em '%s'", clientID, group)
 }
@@ -455,4 +546,48 @@ func (m *GroupManager) getSession(group string) *yamux.Session {
 	}
 	idx := atomic.AddUint64(&g.Counter, 1) % uint64(len(g.Clients))
 	return g.Clients[idx].Session
+}
+
+// --- FUNÇÕES QUE ESTAVAM FALTANDO (CORREÇÃO DO ERRO) ---
+
+func (m *GroupManager) forceDisconnectGroup(groupName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	group, exists := m.groups[groupName]
+	if !exists {
+		return
+	}
+
+	log.Printf("[Manager] ✂️ Desconectando grupo inteiro: %s (%d clientes)", groupName, len(group.Clients))
+	for _, client := range group.Clients {
+		client.Session.Close()
+	}
+	delete(m.groups, groupName)
+}
+
+func (m *GroupManager) disconnectClient(groupName, clientID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	group, exists := m.groups[groupName]
+	if !exists {
+		return false
+	}
+
+	var active []*ProxyClient
+	found := false
+
+	for _, client := range group.Clients {
+		if client.ID == clientID {
+			log.Printf("[Manager] 👢 Expulsando cliente: %s/%s", groupName, clientID)
+			client.Session.Close()
+			found = true
+		} else {
+			active = append(active, client)
+		}
+	}
+
+	group.Clients = active
+	return found
 }
