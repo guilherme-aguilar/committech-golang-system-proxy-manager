@@ -66,7 +66,6 @@ var manager = &GroupManager{
 var (
 	// Essa variável será sobrescrita pelo script de build!
 	Version = "dev"
-	// ... manager, cfg etc
 )
 
 func main() {
@@ -352,6 +351,14 @@ func startAdminServer(addr string) {
 
 func startEnrollmentServer(addr string, caCertPEM, caKeyPEM []byte, serverCert tls.Certificate) {
 	mux := http.NewServeMux()
+
+	// --- NOVO: Rota para baixar o CA (Bootstrapping) ---
+	mux.HandleFunc("/ca.crt", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-pem-file")
+		w.Write(caCertPEM)
+	})
+	// ---------------------------------------------------
+
 	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			return
