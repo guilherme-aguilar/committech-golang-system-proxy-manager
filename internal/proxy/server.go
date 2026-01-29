@@ -17,33 +17,67 @@ import (
 	"proxy-manager/internal/manager"
 )
 
-// --- SISTEMA DE RATE LIMIT (O Porteiro) ---
+// --- SISTEMA DE PRISÃO (JAIL) ---
 var (
-	ipMutex    sync.Mutex
+	// Controle de Concorrência
+	jailMutex sync.RWMutex
+
+	// Mapa de IPs Banidos: IP -> Hora que o ban acaba
+	bannedIPs = make(map[string]time.Time)
+
+	// Mapa de Última Requisição (para detectar flood)
 	ipLastSeen = make(map[string]time.Time)
-	// Limpa o mapa a cada 5 minutos para não estourar memória
+
+	// Limpeza de memória
 	cleanupTime = time.Now()
 )
 
-func isRateLimited(ip string) bool {
-	ipMutex.Lock()
-	defer ipMutex.Unlock()
+// checkAndBan verifica se o IP deve ser bloqueado ou se já está banido
+func checkAndBan(ip string) (banned bool) {
+	jailMutex.Lock()
+	defer jailMutex.Unlock()
 
-	// Limpeza automática de memória se o mapa ficar muito grande
-	if len(ipLastSeen) > 5000 || time.Since(cleanupTime) > 5*time.Minute {
-		ipLastSeen = make(map[string]time.Time)
-		cleanupTime = time.Now()
-	}
-
-	last, exists := ipLastSeen[ip]
 	now := time.Now()
 
-	// Se o IP fez requisição há menos de 1 segundo, BLOQUEIA.
-	// Isso impede o Brute-Force rápido.
+	// 1. Limpeza automática a cada 10 minutos para economizar RAM
+	if time.Since(cleanupTime) > 10*time.Minute {
+		// Remove IPs cujo ban já expirou
+		for k, v := range bannedIPs {
+			if now.After(v) {
+				delete(bannedIPs, k)
+			}
+		}
+		// Zera o histórico de requisições antigas
+		ipLastSeen = make(map[string]time.Time)
+		cleanupTime = now
+	}
+
+	// 2. VERIFICA SE JÁ ESTÁ PRESO
+	if expireTime, isBanned := bannedIPs[ip]; isBanned {
+		if now.Before(expireTime) {
+			return true // Ainda está banido
+		}
+		delete(bannedIPs, ip) // Pena cumprida, solta o meliante
+	}
+
+	// 3. VERIFICA FLOOD (RATE LIMIT)
+	last, exists := ipLastSeen[ip]
+
+	// Se fez requisição há menos de 1 segundo
 	if exists && now.Sub(last) < 1000*time.Millisecond {
+		// --- O JULGAMENTO ---
+		// O usuário floodou. Em vez de só negar, PRENDE ELE.
+		// Banido por 10 Minutos.
+		bannedUntil := now.Add(10 * time.Minute)
+		bannedIPs[ip] = bannedUntil
+
+		// Log para você ver o sistema funcionando (opcional, pode remover se poluir muito)
+		log.Printf("[JAIL] 🚫 IP %s banido por 10 min (Flood detectado)", ip)
+
 		return true
 	}
 
+	// Tudo limpo, atualiza o visto
 	ipLastSeen[ip] = now
 	return false
 }
@@ -61,22 +95,22 @@ func Start(cfg *config.Config, mgr *manager.GroupManager) {
 		IdleTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 2 * time.Second,
 	}
-	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Proteção: Rate Limit Ativo)", cfg.Network.ProxyPort)
+	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Mode: JAILBREAK - Banimento em Memória)", cfg.Network.ProxyPort)
 	log.Fatal(srv.ListenAndServe())
 }
 
 func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
-	// 1. Pega IP Real
+	// 1. Pega IP Real (Funciona mesmo com NAT/Proxy se configurado X-Forwarded-For)
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
 	}
 
-	// 2. CHECK DE RATE LIMIT (ANTES DE TUDO)
-	// Se o cara está floodando, rejeita aqui e salva a CPU.
-	if isRateLimited(ip) {
-		// Retorna 429 Too Many Requests sem processar nada pesado
-		http.Error(w, "Too Many Requests", 429)
+	// 2. CHECK DE PRISÃO (Custo de CPU quase zero)
+	if checkAndBan(ip) {
+		// Retorna erro seco e fecha a conexão.
+		// Não gasta CPU com banco de dados nem lógica.
+		http.Error(w, "IP Banned temporarily", 429)
 		return
 	}
 
@@ -88,7 +122,7 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 		return
 	}
 
-	// Parse rápido (custo de CPU baixo)
+	// Parse rápido
 	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
 	if err != nil {
 		http.Error(w, "Bad Request", 400)
@@ -100,11 +134,10 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 		return
 	}
 
-	// 4. Autenticação no Banco (Custo de CPU ALTO)
-	// Agora só chega aqui quem passou pelo Rate Limit (1 req/segundo)
+	// 4. Autenticação no Banco (Pesado)
 	group, ok := database.AuthenticateUser(pair[0], pair[1], ip)
 	if !ok {
-		// Tarpit leve de 1s para desencorajar
+		// Se errou a senha, dorme 1s para desencorajar e retorna
 		time.Sleep(1 * time.Second)
 		http.Error(w, "Forbidden", 403)
 		return
