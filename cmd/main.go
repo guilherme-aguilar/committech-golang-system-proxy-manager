@@ -237,7 +237,14 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func startAdminServer(addr string) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.ServeFile(w, r, "dashboard.html") })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Se a rota não for EXATAMENTE "/" ou "/dashboard.html", retorna 404
+		if r.URL.Path != "/" && r.URL.Path != "/dashboard.html" {
+			http.NotFound(w, r)
+			return
+		}
+		http.ServeFile(w, r, "dashboard.html")
+	})
 
 	// Exemplo de uma rota de API:
 	mux.HandleFunc("/users", authMiddleware(func(w http.ResponseWriter, r *http.Request) {
