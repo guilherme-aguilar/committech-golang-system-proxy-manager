@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"proxy-manager/internal/config" // <--- IMPORTANTE: Adicionado
+
 	"github.com/hashicorp/yamux"
 )
 
@@ -21,11 +23,14 @@ type Group struct {
 type GroupManager struct {
 	mu     sync.RWMutex
 	groups map[string]*Group
+	cfg    *config.Config // <--- IMPORTANTE: Guardamos a config aqui
 }
 
-func New() *GroupManager {
+// New agora aceita a configuração para alinhar com o main.go
+func New(cfg *config.Config) *GroupManager {
 	return &GroupManager{
 		groups: make(map[string]*Group),
+		cfg:    cfg,
 	}
 }
 
@@ -38,7 +43,7 @@ func (m *GroupManager) RegisterClient(clientID, groupName string, s *yamux.Sessi
 	}
 	g := m.groups[groupName]
 
-	// Remove antigas
+	// Remove conexões antigas com o mesmo ID para evitar duplicatas fantasmas
 	var active []*ProxyClient
 	for _, c := range g.Clients {
 		if c.ID == clientID {
@@ -50,7 +55,7 @@ func (m *GroupManager) RegisterClient(clientID, groupName string, s *yamux.Sessi
 	g.Clients = active
 	g.Clients = append(g.Clients, &ProxyClient{ID: clientID, Session: s})
 
-	log.Printf("[Registry] '%s' registrado em '%s'", clientID, groupName)
+	log.Printf("[Registry] 📝 Agente '%s' registrado no grupo '%s'", clientID, groupName)
 }
 
 func (m *GroupManager) GetSession(groupName string) *yamux.Session {
@@ -60,6 +65,8 @@ func (m *GroupManager) GetSession(groupName string) *yamux.Session {
 	if !ok || len(g.Clients) == 0 {
 		return nil
 	}
+
+	// Load Balancer (Round-Robin) simples usando contador atômico
 	idx := atomic.AddUint64(&g.Counter, 1) % uint64(len(g.Clients))
 	return g.Clients[idx].Session
 }

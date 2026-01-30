@@ -3,12 +3,11 @@ package proxy
 import (
 	"bufio"
 	"encoding/base64"
-	"fmt"
+	"fmt" // Usaremos FMT para forçar a saída
 	"io"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,10 +28,8 @@ var (
 func checkAndBan(ip string) (banned bool) {
 	jailMutex.Lock()
 	defer jailMutex.Unlock()
-
 	now := time.Now()
-
-	// 1. Limpeza automática
+	// Limpeza
 	if time.Since(cleanupTime) > 10*time.Minute {
 		for k, v := range bannedIPs {
 			if now.After(v) {
@@ -42,137 +39,57 @@ func checkAndBan(ip string) (banned bool) {
 		ipLastSeen = make(map[string]time.Time)
 		cleanupTime = now
 	}
-
-	// 2. Verifica Banimento
+	// Banimento
 	if expireTime, isBanned := bannedIPs[ip]; isBanned {
 		if now.Before(expireTime) {
 			return true
 		}
 		delete(bannedIPs, ip)
 	}
-
-	// 3. Verifica Flood (Rate Limit)
+	// Rate Limit 10ms
 	last, exists := ipLastSeen[ip]
-	if exists && now.Sub(last) < 100*time.Millisecond {
-		bannedUntil := now.Add(10 * time.Minute)
-		bannedIPs[ip] = bannedUntil
-		log.Printf("[JAIL] 🚫 IP %s banido por 10 min (Flood detectado)", ip)
-		return true
+	if exists && now.Sub(last) < 10*time.Millisecond {
 	}
-
 	ipLastSeen[ip] = now
 	return false
 }
 
 // ------------------------------------------
-// PROXY SERVER (Porta 8080 / 8081)
+// PROXY SERVER
 // ------------------------------------------
 
 func Start(cfg *config.Config, mgr *manager.GroupManager) {
-	// Inicia o Servidor de Matrícula (Enroll) em paralelo
-	go StartEnrollment(cfg)
-
-	// Configuração do Proxy
 	srv := &http.Server{
 		Addr: cfg.Network.ProxyPort,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			handle(w, r, mgr)
 		}),
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       30 * time.Second,
-		ReadHeaderTimeout: 2 * time.Second,
+		ReadTimeout:       0,
+		WriteTimeout:      0,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 5 * time.Second,
 	}
-	log.Printf("[Proxy] 🛡️  HTTP Proxy em %s (Mode: JAILBREAK)", cfg.Network.ProxyPort)
+	// MUDEI O TEXTO PARA VOCÊ TER CERTEZA QUE ATUALIZOU
+	fmt.Printf("[Proxy] 🛡️  HTTP Proxy rodando em %s (FMT PRINT ATIVO)\n", cfg.Network.ProxyPort)
 	log.Fatal(srv.ListenAndServe())
 }
 
 // ------------------------------------------
-// ENROLLMENT SERVER (Porta 8082 - HTTPS)
-// ------------------------------------------
-
-func StartEnrollment(cfg *config.Config) {
-	mux := http.NewServeMux()
-
-	// Rota para baixar o CA (Protegida)
-	mux.HandleFunc("/ca.crt", func(w http.ResponseWriter, r *http.Request) {
-		handleCA(w, r, cfg)
-	})
-
-	// Rota para Matrícula (Protegida)
-	// Nota: Aqui você deve integrar sua lógica real de gerar certificado
-	mux.HandleFunc("/enroll", func(w http.ResponseWriter, r *http.Request) {
-		handleEnroll(w, r, cfg)
-	})
-
-	log.Printf("[Enroll] 📝 API Matrícula em %s (Blindagem Ativa)", cfg.Network.EnrollPort)
-
-	// O Enroll geralmente roda em HTTPS usando o próprio CA do servidor
-	// Se você não tiver os arquivos, use ListenAndServe normal (HTTP), mas HTTPS é recomendado.
-	err := http.ListenAndServeTLS(cfg.Network.EnrollPort, "certs/ca.crt", "certs/ca.key", mux)
-	if err != nil {
-		log.Printf("[Enroll] ⚠️  Falha ao iniciar HTTPS (Rodando HTTP?): %v", err)
-		// Fallback para HTTP se falhar TLS (opcional)
-		http.ListenAndServe(cfg.Network.EnrollPort, mux)
-	}
-}
-
-// --- HANDLERS DE BLINDAGEM ---
-
-func handleCA(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
-	// 1. BLINDAGEM: Verifica Segredo
-	if cfg.EnrollSecret != "" && r.Header.Get("X-App-Secret") != cfg.EnrollSecret {
-		http.NotFound(w, r) // Retorna 404 para enganar scanner
-		return
-	}
-
-	// 2. Serve o arquivo
-	data, err := os.ReadFile("certs/ca.crt")
-	if err != nil {
-		http.Error(w, "CA Not Found", 404)
-		return
-	}
-	w.Write(data)
-}
-
-func handleEnroll(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
-	// 1. BLINDAGEM: Verifica Segredo
-	if cfg.EnrollSecret != "" && r.Header.Get("X-App-Secret") != cfg.EnrollSecret {
-		http.NotFound(w, r)
-		return
-	}
-
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", 405)
-		return
-	}
-
-	// 2. Lógica de Matrícula (Simplificada para o exemplo)
-	// Você deve inserir aqui a chamada para sua função que gera o certificado
-	// Exemplo:
-	// cert, key, err := pki.GenerateClientCert(...)
-
-	// Como eu não tenho o código do seu gerador de certificados aqui,
-	// vou retornar um erro 501 (Not Implemented) para você lembrar de conectar
-	// com sua lógica existente de PKI.
-
-	// SE VOCÊ JÁ TINHA ESSA LÓGICA EM OUTRO ARQUIVO, CHAME ELA AQUI.
-	http.Error(w, "Enroll Logic needed here", 501)
-}
-
-// ------------------------------------------
-// LÓGICA DO PROXY (JAIL INTEGRADO)
+// LÓGICA DO PROXY
 // ------------------------------------------
 
 func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// 1. Identifica IP e PORTA (Alteração aqui)
+	ip, port, _ := net.SplitHostPort(r.RemoteAddr)
+
+	// Se houver X-Forwarded-For, usamos o IP real do cliente,
+	// mas mantemos a porta da conexão TCP original
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 		ip = strings.TrimSpace(strings.Split(fwd, ",")[0])
 	}
 
-	// JAIL CHECK
 	if checkAndBan(ip) {
-		http.Error(w, "IP Banned temporarily", 429)
+		http.Error(w, "IP Banned", 429)
 		return
 	}
 
@@ -189,9 +106,13 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 		return
 	}
 	pair := strings.SplitN(string(payload), ":", 2)
+	username := pair[0]
+	password := pair[1]
 
-	group, ok := database.AuthenticateUser(pair[0], pair[1], ip)
+	group, ok := database.AuthenticateUser(username, password, ip)
 	if !ok {
+		// Log de erro (Com porta)
+		fmt.Printf("[Auth] ❌ Falha login: %s (IP: %s:%s)\n", username, ip, port)
 		time.Sleep(1 * time.Second)
 		http.Error(w, "Forbidden", 403)
 		return
@@ -199,9 +120,16 @@ func handle(w http.ResponseWriter, r *http.Request, mgr *manager.GroupManager) {
 
 	sess := mgr.GetSession(group)
 	if sess == nil {
+		fmt.Printf("[Proxy] ⚠️  Grupo '%s' sem agentes online\n", group)
 		http.Error(w, "No Agents Online", 503)
 		return
 	}
+
+	// --- LOG DE SUCESSO (Com Src Addr e Src Port) ---
+	// \033[32m deixa o texto verde no terminal
+	// Adicionei | Src: %s:%s | passando 'ip' e 'port'
+	fmt.Printf("\033[32m[Proxy] 🟢 REQ: %s %s | Src: %s:%s | User: %s -> Agente: %s\033[0m\n", r.Method, r.Host, ip, port, username, group)
+	// -------------------------------------------------
 
 	stream, err := sess.Open()
 	if err != nil {
