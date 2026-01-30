@@ -53,7 +53,7 @@ func checkAndBan(ip string) (banned bool) {
 
 	// 3. Verifica Flood (Rate Limit)
 	last, exists := ipLastSeen[ip]
-	if exists && now.Sub(last) < 1000*time.Millisecond {
+	if exists && now.Sub(last) < 100*time.Millisecond {
 		bannedUntil := now.Add(10 * time.Minute)
 		bannedIPs[ip] = bannedUntil
 		log.Printf("[JAIL] 🚫 IP %s banido por 10 min (Flood detectado)", ip)
