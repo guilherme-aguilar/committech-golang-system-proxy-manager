@@ -157,9 +157,30 @@ func handleTunnel(w http.ResponseWriter, r *http.Request, stream net.Conn) {
 	}
 	defer conn.Close()
 
-	conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+	// 1. Envia o comando para o Agente (dentro do túnel Yamux)
 	fmt.Fprintf(stream, "CONNECT %s HTTP/1.1\r\n\r\n", r.Host)
 
+	// 2. CORREÇÃO CRÍTICA: Ler a resposta do Agente ANTES de responder ao Curl
+	// O Agente vai responder "HTTP/1.1 200 OK" para o Server.
+	// Nós precisamos CONSUMIR isso aqui para não vazar para o Curl.
+	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
+	if err != nil {
+		conn.Close()
+		return
+	}
+	resp.Body.Close() // Descarta o corpo, só queríamos limpar o header do stream
+
+	// Se o Agente disse que deu erro (ex: 502), fecha tudo
+	if resp.StatusCode != 200 {
+		conn.Close()
+		return
+	}
+
+	// 3. AGORA SIM: Responde 200 OK para o Usuário final (Curl/Evolution)
+	// O túnel está limpo e pronto para tráfego binário (TLS)
+	conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\n"))
+
+	// 4. Inicia a cópia dos dados (Agora é só bytes puros do site)
 	go io.Copy(stream, conn)
 	io.Copy(conn, stream)
 }
